@@ -14,7 +14,7 @@ Requires Go 1.24 or later.
 
 | Package | Description |
 | ------- | ----------- |
-| _none yet_ | |
+| [`logger`](logger) | Process-wide JSON logger built on `log/slog`. Call `logger.Init("my-service")` once in `main`, then `logger.Info/Warn/Error`. |
 
 ## Development
 
