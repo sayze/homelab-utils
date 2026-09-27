@@ -7,7 +7,28 @@ import (
 
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// entry is one call recorded by fakeLogger.
+type entry struct {
+	level, msg string
+	args       map[string]any
+}
+
+type fakeLogger struct{ entries []entry }
+
+func (f *fakeLogger) record(level, msg string, args []any) {
+	m := map[string]any{}
+	for i := 0; i+1 < len(args); i += 2 {
+		m[args[i].(string)] = args[i+1]
+	}
+	f.entries = append(f.entries, entry{level, msg, m})
+}
+
+func (f *fakeLogger) Info(msg string, args ...any)  { f.record("INFO", msg, args) }
+func (f *fakeLogger) Warn(msg string, args ...any)  { f.record("WARN", msg, args) }
+func (f *fakeLogger) Error(msg string, args ...any) { f.record("ERROR", msg, args) }
 
 func serve(h http.Handler, path string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
@@ -66,4 +87,36 @@ func TestNew_AbortHandlerPanicPropagates(t *testing.T) {
 	r.Get("/abort", func(http.ResponseWriter, *http.Request) { panic(http.ErrAbortHandler) })
 
 	assert.PanicsWithValue(t, http.ErrAbortHandler, func() { serve(r, "/abort") })
+}
+
+func TestWithLogger_RequestLine(t *testing.T) {
+	log := &fakeLogger{}
+	rec := serve(New(WithLogger(log)), HealthPath)
+
+	require.Len(t, log.entries, 1)
+	got := log.entries[0]
+	assert.Equal(t, "INFO", got.level)
+	assert.Equal(t, "request", got.msg)
+	assert.Equal(t, http.MethodGet, got.args["method"])
+	assert.Equal(t, HealthPath, got.args["path"])
+	assert.Equal(t, rec.Code, got.args["status"])
+	assert.NotEmpty(t, got.args["request_id"])
+}
+
+func TestWithLogger_PanicLine(t *testing.T) {
+	log := &fakeLogger{}
+	r := New(WithLogger(log))
+	r.Get("/boom", func(http.ResponseWriter, *http.Request) { panic("boom") })
+
+	serve(r, "/boom")
+
+	require.Len(t, log.entries, 2)
+	assert.Equal(t, "ERROR", log.entries[0].level)
+	assert.Equal(t, "handler panicked", log.entries[0].msg)
+	assert.Equal(t, "boom", log.entries[0].args["panic"])
+	assert.Equal(t, http.StatusInternalServerError, log.entries[1].args["status"])
+}
+
+func TestWithLogger_NilKeepsDefault(t *testing.T) {
+	assert.NotPanics(t, func() { serve(New(WithLogger(nil)), HealthPath) })
 }
