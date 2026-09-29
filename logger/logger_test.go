@@ -55,10 +55,10 @@ func TestLog_JSONShape(t *testing.T) {
 			assert.Equal(t, tt.level, got["level"])
 			assert.Equal(t, "x", got["key"])
 
-			ts, ok := got["time"].(string)
-			require.True(t, ok, "time should be a string")
-			_, err := time.Parse(time.RFC3339Nano, ts)
-			assert.NoError(t, err)
+			assert.NotContains(t, got, "time")
+			ts, ok := got[TimestampKey].(float64)
+			require.True(t, ok, "timestamp should be a number")
+			assert.WithinDuration(t, time.Now(), time.UnixMilli(int64(ts)), time.Minute)
 		})
 	}
 }
