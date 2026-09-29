@@ -16,6 +16,7 @@ Requires Go 1.24 or later.
 | ------- | ----------- |
 | [`logger`](logger) | Process-wide JSON logger built on `log/slog`. Call `logger.Init("my-service")` once in `main`, then `logger.Info/Warn/Error`. |
 | [`router`](router) | chi router with request IDs, JSON request logging, panic recovery and `GET /health`. Call `router.New()` (or `router.New(router.WithLogger(l))`), add routes, use it as the `http.Server` handler. |
+| [`server`](server) | HTTP server with graceful shutdown, `OnStart`/`OnStop` hooks and JSON lifecycle logs. Call `server.New(handler, opts...).Run(ctx)` (optionally with `server.WithLogger(l)`); it serves until `ctx` is cancelled. |
 
 ## Development
 
