@@ -6,7 +6,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -255,4 +257,32 @@ func TestRun_WaitsForInFlightRequests(t *testing.T) {
 
 	assert.Equal(t, "done", <-respCh)
 	assert.NoError(t, wait(t, done))
+}
+
+func TestRunWithSignals_StopsOnSignal(t *testing.T) {
+	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
+		t.Run(sig.String(), func(t *testing.T) {
+			log := &fakeLogger{}
+			stopped := false
+			s := New(okHandler,
+				WithAddr("127.0.0.1:0"),
+				WithLogger(log),
+				// The handler is registered by now, so the signal is caught
+				// rather than killing the test binary.
+				OnStart(func(context.Context) error {
+					p, err := os.FindProcess(os.Getpid())
+					require.NoError(t, err)
+					return p.Signal(sig)
+				}),
+				OnStop(func(context.Context) error { stopped = true; return nil }),
+			)
+
+			done := make(chan error, 1)
+			go func() { done <- s.RunWithSignals() }()
+
+			require.NoError(t, wait(t, done))
+			assert.True(t, stopped)
+			assert.Equal(t, []string{"INFO server started", "INFO server stopping", "INFO server stopped"}, log.msgs())
+		})
+	}
 }

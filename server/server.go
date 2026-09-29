@@ -5,16 +5,16 @@
 // Lifecycle log lines go to the Logger passed to WithLogger, or
 // slog.Default() (which logger.Init sets) otherwise.
 //
-//	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-//	defer stop()
 //	srv := server.New(router.New(),
 //		server.WithAddr(":8080"),
 //		server.OnStart(func(ctx context.Context) error { return db.Ping(ctx) }),
 //		server.OnStop(func(ctx context.Context) error { return db.Close() }),
 //	)
-//	if err := srv.Run(ctx); err != nil {
+//	if err := srv.RunWithSignals(); err != nil {
 //		os.Exit(1) // Run has already logged err
 //	}
+//
+// Use Run instead to stop the server on a context of your own.
 package server
 
 import (
@@ -24,7 +24,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -140,6 +143,14 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	s.logger().Info("server stopped")
 	return nil
+}
+
+// RunWithSignals is Run with a context cancelled on SIGINT or SIGTERM, the
+// usual way to stop a service.
+func (s *Server) RunWithSignals() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return s.Run(ctx)
 }
 
 func (s *Server) run(ctx context.Context) error {
