@@ -81,24 +81,127 @@ func wait(t *testing.T, done <-chan error) error {
 	}
 }
 
-func TestRun_HooksAndServing(t *testing.T) {
-	var calls []string
+func TestRun_Lifecycle(t *testing.T) {
+	boom := errors.New("boom")
+	tests := []struct {
+		name      string
+		addrInUse bool
+		startErr  error
+		stopErr   error
+		wantErr   error // Run's error must wrap this
+		wantAny   bool  // Run must fail, with any error
+		wantCalls []string
+		wantLogs  []string
+	}{
+		{
+			name:      "clean run",
+			wantCalls: []string{"start", "stop"},
+			wantLogs:  []string{"INFO server started", "INFO server stopping", "INFO server stopped"},
+		},
+		{
+			name:      "start hook fails",
+			startErr:  boom,
+			wantErr:   boom,
+			wantCalls: []string{"start"},
+			wantLogs:  []string{"ERROR server failed"},
+		},
+		{
+			name:      "stop hook fails",
+			stopErr:   boom,
+			wantErr:   boom,
+			wantCalls: []string{"start", "stop"},
+			wantLogs:  []string{"INFO server started", "INFO server stopping", "ERROR server failed"},
+		},
+		{
+			name:      "listen fails",
+			addrInUse: true,
+			wantAny:   true,
+			wantLogs:  []string{"ERROR server failed"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr := "127.0.0.1:0"
+			if tt.addrInUse {
+				ln, err := net.Listen("tcp", addr)
+				require.NoError(t, err)
+				defer func() { _ = ln.Close() }()
+				addr = ln.Addr().String()
+			}
+
+			// OnStart cancels ctx, so Run stops as soon as it starts serving.
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			log := &fakeLogger{}
+			var calls []string
+			s := New(okHandler,
+				WithAddr(addr),
+				WithLogger(log),
+				OnStart(func(context.Context) error {
+					calls = append(calls, "start")
+					cancel()
+					return tt.startErr
+				}),
+				OnStop(func(ctx context.Context) error {
+					calls = append(calls, "stop")
+					assert.NoError(t, ctx.Err(), "stop hook context should still be live")
+					return tt.stopErr
+				}),
+			)
+
+			err := s.Run(ctx)
+
+			switch {
+			case tt.wantErr != nil:
+				require.ErrorIs(t, err, tt.wantErr)
+			case tt.wantAny:
+				require.Error(t, err)
+			default:
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.wantCalls, calls)
+			assert.Equal(t, tt.wantLogs, log.msgs())
+			if err != nil {
+				assert.Equal(t, err, log.entries[len(log.entries)-1].args["error"])
+			}
+			if !tt.addrInUse {
+				_, dialErr := net.Dial("tcp", s.Addr().String())
+				assert.Error(t, dialErr, "listener should be closed")
+			}
+		})
+	}
+}
+
+// TestRun_OptionalConfig checks Run works with options left unset or nil.
+func TestRun_OptionalConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []Option
+	}{
+		{"no hooks or logger", nil},
+		{"nil logger", []Option{WithLogger(nil)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			opts := append([]Option{WithAddr("127.0.0.1:0")}, tt.opts...)
+
+			assert.NoError(t, New(okHandler, opts...).Run(ctx))
+		})
+	}
+}
+
+func TestRun_Serves(t *testing.T) {
 	started := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	s := New(okHandler,
 		WithAddr("127.0.0.1:0"),
-		OnStart(func(context.Context) error {
-			calls = append(calls, "start")
-			close(started)
-			return nil
-		}),
-		OnStop(func(ctx context.Context) error {
-			calls = append(calls, "stop")
-			assert.NoError(t, ctx.Err(), "stop hook context should still be live")
-			return nil
-		}),
+		OnStart(func(context.Context) error { close(started); return nil }),
 	)
 	done := start(ctx, t, s, started)
 
@@ -110,62 +213,6 @@ func TestRun_HooksAndServing(t *testing.T) {
 
 	cancel()
 	require.NoError(t, wait(t, done))
-	assert.Equal(t, []string{"start", "stop"}, calls)
-}
-
-func TestRun_StartHookErrorAborts(t *testing.T) {
-	boom := errors.New("boom")
-	stopped := false
-	s := New(okHandler,
-		WithAddr("127.0.0.1:0"),
-		OnStart(func(context.Context) error { return boom }),
-		OnStop(func(context.Context) error { stopped = true; return nil }),
-	)
-
-	err := s.Run(context.Background())
-
-	require.ErrorIs(t, err, boom)
-	assert.False(t, stopped, "stop hook should not run when start fails")
-	_, dialErr := net.Dial("tcp", s.Addr().String())
-	assert.Error(t, dialErr, "listener should be closed")
-}
-
-func TestRun_StopHookErrorReturned(t *testing.T) {
-	boom := errors.New("boom")
-	started := make(chan struct{})
-	ctx, cancel := context.WithCancel(context.Background())
-
-	s := New(okHandler,
-		WithAddr("127.0.0.1:0"),
-		OnStart(func(context.Context) error { close(started); return nil }),
-		OnStop(func(context.Context) error { return boom }),
-	)
-	done := start(ctx, t, s, started)
-	cancel()
-
-	assert.ErrorIs(t, wait(t, done), boom)
-}
-
-func TestRun_ListenError(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer func() { _ = ln.Close() }()
-
-	started := false
-	s := New(okHandler,
-		WithAddr(ln.Addr().String()),
-		OnStart(func(context.Context) error { started = true; return nil }),
-	)
-
-	assert.Error(t, s.Run(context.Background()))
-	assert.False(t, started, "start hook should not run when listen fails")
-}
-
-func TestRun_NoHooks(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	assert.NoError(t, New(okHandler, WithAddr("127.0.0.1:0")).Run(ctx))
 }
 
 func TestRun_WaitsForInFlightRequests(t *testing.T) {
@@ -208,51 +255,4 @@ func TestRun_WaitsForInFlightRequests(t *testing.T) {
 
 	assert.Equal(t, "done", <-respCh)
 	assert.NoError(t, wait(t, done))
-}
-
-func TestWithLogger_Lifecycle(t *testing.T) {
-	log := &fakeLogger{}
-	started := make(chan struct{})
-	ctx, cancel := context.WithCancel(context.Background())
-
-	s := New(okHandler,
-		WithAddr("127.0.0.1:0"),
-		WithLogger(log),
-		OnStart(func(context.Context) error { close(started); return nil }),
-	)
-	done := start(ctx, t, s, started)
-	cancel()
-	require.NoError(t, wait(t, done))
-
-	assert.Equal(t, []string{
-		"INFO server started",
-		"INFO server stopping",
-		"INFO server stopped",
-	}, log.msgs())
-	assert.Equal(t, s.Addr().String(), log.entries[0].args["addr"])
-}
-
-func TestWithLogger_ErrorLogged(t *testing.T) {
-	log := &fakeLogger{}
-	boom := errors.New("boom")
-	s := New(okHandler,
-		WithAddr("127.0.0.1:0"),
-		WithLogger(log),
-		OnStart(func(context.Context) error { return boom }),
-	)
-
-	err := s.Run(context.Background())
-
-	require.Len(t, log.entries, 1)
-	assert.Equal(t, "server failed", log.entries[0].msg)
-	assert.Equal(t, err, log.entries[0].args["error"])
-}
-
-func TestWithLogger_NilKeepsDefault(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	assert.NotPanics(t, func() {
-		_ = New(okHandler, WithAddr("127.0.0.1:0"), WithLogger(nil)).Run(ctx)
-	})
 }

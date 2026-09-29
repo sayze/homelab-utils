@@ -163,10 +163,12 @@ func (s *Server) run(ctx context.Context) error {
 	s.logger().Info("server started", "addr", ln.Addr().String())
 
 	var errs []error
+	served := false
 	select {
 	case err := <-serveErr:
 		// Serve never returns ErrServerClosed here: only Shutdown causes it.
 		errs = append(errs, fmt.Errorf("serve: %w", err))
+		served = true
 		s.logger().Warn("server stopping after serve error")
 	case <-ctx.Done():
 		s.logger().Info("server stopping", "timeout_ms", s.shutdownTimeout.Milliseconds())
@@ -178,6 +180,11 @@ func (s *Server) run(ctx context.Context) error {
 
 	if err := s.http.Shutdown(stopCtx); err != nil {
 		errs = append(errs, fmt.Errorf("shutdown: %w", err))
+	}
+	if !served {
+		// Shutdown makes Serve return promptly. Wait for it: if Serve had not
+		// registered the listener yet, only Serve itself closes it.
+		<-serveErr
 	}
 	if s.onStop != nil {
 		if err := s.onStop(stopCtx); err != nil {
