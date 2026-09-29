@@ -1,7 +1,9 @@
 // Package logger provides a process-wide JSON logger built on log/slog.
 // Every line has the form:
 //
-//	{"time":"...","level":"INFO","msg":"...","component":"my-service",...}
+//	{"timestamp":1727568000000,"level":"INFO","msg":"...","component":"my-service",...}
+//
+// timestamp is Unix epoch milliseconds, the format New Relic reads natively.
 //
 // Call Init once in main, then log with Info, Warn and Error.
 package logger
@@ -17,6 +19,9 @@ import (
 // ComponentKey is the key that holds the service name on every line.
 const ComponentKey = "component"
 
+// TimestampKey is the key that holds the log time, in Unix epoch milliseconds.
+const TimestampKey = "timestamp"
+
 // defaultComponent is used when logging happens before Init.
 const defaultComponent = "unknown"
 
@@ -31,11 +36,20 @@ var (
 // effect, including the implicit one made by logging before Init.
 func Init(component string) {
 	once.Do(func() {
-		h := slog.NewJSONHandler(out, nil)
+		h := slog.NewJSONHandler(out, &slog.HandlerOptions{ReplaceAttr: epochMillis})
 		std = slog.New(h).With(ComponentKey, component)
 		slog.SetDefault(std)
 		log.SetFlags(0)
 	})
+}
+
+// epochMillis replaces slog's RFC 3339 time attr with TimestampKey in
+// Unix epoch milliseconds.
+func epochMillis(groups []string, a slog.Attr) slog.Attr {
+	if len(groups) == 0 && a.Key == slog.TimeKey {
+		return slog.Int64(TimestampKey, a.Value.Time().UnixMilli())
+	}
+	return a
 }
 
 // get returns the logger, initialising it with defaultComponent if needed.
